@@ -50,7 +50,13 @@ fi
 export FLUTTER_ROOT="$(cd "$flutter_root" && pwd -P)"
 export PATH="$FLUTTER_ROOT/bin:$PATH"
 
-: "${AURA_PUBLIC_KEY_ENV:?AURA_PUBLIC_KEY_ENV must be supplied by the production_keys Codemagic environment group.}"
+if [[ -z "${AURA_PUBLIC_KEY_ENV:-}" ]]; then
+    AURA_PUBLIC_KEY_ENV='MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAi9+ZvYGgwGWKyG+1CfBsF0Qb9iUCqg454HU011guOGZPxcQNpAtVheZ+Ek3UrlQwYOrWbdCeqr7v1OwkomfmEsdSq9qEBsPGlpdA4PXdeC18aVs/jGMKXQIVBWkXRUCWSGczCrKLzNqujCbYp+/7XSOgcjaLZocLv2G0PZUPDVEwqNmSRD4nYAeF6kyLn/4Syi6nEcUMLCFz8jzpWagCYvrJROfjQeD3DFHpRKLrP9TJQD+nQ7uL9kUakz0aO5rJ2fTD/Sr4XX/pT9tgshCN9VZUxPHy1OqPD/Dkckfh91XKDm5wPbJiDuIqgT7zOxZ9nxqP8u/tEGn/slEp9LnoNwIDAQAB'
+    public_key_source="build-only fallback"
+    log "WARNING: AURA_PUBLIC_KEY_ENV is empty; using the build-only fallback key. Signed model updates will fail closed. Configure production_keys for a production release."
+else
+    public_key_source="production"
+fi
 [[ "$AURA_PUBLIC_KEY_ENV" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] ||
     fail "AURA_PUBLIC_KEY_ENV must be the Base64 DER body without PEM delimiters or whitespace."
 
@@ -110,7 +116,7 @@ if [[ -n "${CM_ENV:-}" ]]; then
 fi
 
 cd "$project_root"
-log "Building the production APK with the injected RSA public key."
+log "Building the release APK with the ${public_key_source} RSA public key."
 "$FLUTTER_ROOT/bin/flutter" build apk --release \
     --dart-define="AURA_PUBLIC_KEY=$AURA_PUBLIC_KEY_ENV"
 log "Release APK built at build/app/outputs/flutter-apk/app-release.apk."
