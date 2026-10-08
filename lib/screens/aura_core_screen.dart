@@ -6,7 +6,9 @@ import '../agent/agent_controller.dart';
 import '../agent/agent_event.dart';
 import '../infrastructure/agent/aura_intent_parser.dart';
 import '../providers/aura_state_provider.dart';
-import '../theme/aura_tokens.dart';
+
+const Color _terminalGreen = Color(0xFF00FF00);
+const Color _terminalYellow = Color(0xFFFFFF00);
 
 class AuraCoreScreen extends StatefulWidget {
   const AuraCoreScreen({super.key});
@@ -15,39 +17,47 @@ class AuraCoreScreen extends StatefulWidget {
   State<AuraCoreScreen> createState() => _AuraCoreScreenState();
 }
 
-class _AuraCoreScreenState extends State<AuraCoreScreen>
-    with SingleTickerProviderStateMixin {
+class _AuraCoreScreenState extends State<AuraCoreScreen> {
   static const MethodChannel _voiceChannel =
       MethodChannel('com.ciberdefensa.aura/voice');
 
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  late final AnimationController _cursorBlink;
   bool _isListening = false;
   bool _isRunning = false;
+  bool _isAuthenticated = false;
+  bool _authenticationFailed = false;
   int _lastRenderedEventCount = -1;
-  AgentEvent? _lastCommandResponse;
 
   @override
   void initState() {
     super.initState();
-    _cursorBlink = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 750),
-      lowerBound: 0.15,
-      upperBound: 1,
-    )..repeat(reverse: true);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final controller = AgentController.instance;
-      controller.bindSecurityState(context.read<AuraStateProvider>());
-      controller.initGreeting();
+      _authenticateConsole();
     });
+  }
+
+  Future<void> _authenticateConsole() async {
+    final controller = AgentController.instance;
+    controller.bindSecurityState(context.read<AuraStateProvider>());
+    final authenticated = await controller.authenticateBiometricDevice();
+    if (!mounted) return;
+    if (authenticated) {
+      controller.initGreeting();
+      setState(() => _isAuthenticated = true);
+      return;
+    }
+
+    controller.reportCriticalError(
+      'PÁNICO CRÍTICO: AUTENTICACIÓN BIOMÉTRICA DENEGADA. CONSOLA BLOQUEADA.',
+    );
+    setState(() => _authenticationFailed = true);
+    await Future<void>.delayed(const Duration(seconds: 2));
+    if (mounted) await SystemNavigator.pop();
   }
 
   @override
   void dispose() {
-    _cursorBlink.dispose();
     _scrollController.dispose();
     _inputController.dispose();
     super.dispose();
@@ -59,20 +69,33 @@ class _AuraCoreScreenState extends State<AuraCoreScreen>
     _inputController.clear();
     setState(() => _isRunning = true);
     try {
+      final controller = AgentController.instance;
+      controller.reportTerminalInput(instruction);
+      _scrollToLatest(controller.history.length, force: true);
+
+      for (var second = 0; second < 3; second++) {
+        await Future<void>.delayed(const Duration(seconds: 1));
+        if (!mounted) return;
+        controller.reportTerminalThinking();
+        _scrollToLatest(controller.history.length, force: true);
+      }
+
       final result = await AuraIntentParser.executeCommand(instruction);
       final response = result['response'];
-      final responseEvent = result['event'];
-      if (mounted && response is String && responseEvent is AgentEvent) {
-        setState(() {
-          _lastCommandResponse = AgentEvent(
-            kind: responseEvent.kind,
-            message: response,
-            ts: responseEvent.ts,
-            data: <String, dynamic>{'terminal_response': true},
+      if (response is String) {
+        final notificationSent = await controller.dispatchRealtimeNotification(
+          'Aura Mobile Defens',
+          response,
+        );
+        if (!notificationSent && mounted) {
+          controller.reportWarning(
+            'Alerta no publicada: Android denegó el permiso o el servicio foreground.',
           );
-        });
+        }
       }
-      _scrollToLatest(AgentController.instance.history.length, force: true);
+      if (mounted) {
+        _scrollToLatest(controller.history.length, force: true);
+      }
     } finally {
       if (mounted) setState(() => _isRunning = false);
     }
@@ -122,108 +145,50 @@ class _AuraCoreScreenState extends State<AuraCoreScreen>
 
   @override
   Widget build(BuildContext context) {
-    final security = context.watch<AuraStateProvider>();
-
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: const Color(0xFF000000),
       resizeToAvoidBottomInset: true,
       body: SafeArea(
         child: Column(
           children: [
-            _TerminalHeader(
-              securityLevel: security.securityLevel,
-            ),
-            const Divider(height: 1, color: Color(0xFF17352B)),
-            Expanded(
-              child: StreamBuilder<AgentEvent>(
-                stream: AgentController.instance.events,
-                builder: (context, snapshot) {
-                  final events = List<AgentEvent>.of(
-                    AgentController.instance.history,
-                    growable: true,
-                  );
-                  final commandResponse = _lastCommandResponse;
-                  if (commandResponse != null) {
-                    final responseText = commandResponse.message.replaceFirst(
-                      RegExp(r'^\[(?:OK|WARN|CRIT)\]\s*'),
-                      '',
-                    );
-                    final responseIndex = events.lastIndexWhere(
-                      (event) => event.message == responseText,
-                    );
-                    if (responseIndex >= 0) {
-                      events[responseIndex] = commandResponse;
-                    }
-                  }
-                  _scrollToLatest(events.length);
-                  return ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 18),
-                    itemCount: events.length,
-                    itemBuilder: (context, index) =>
-                        _SyslogLine(event: events[index]),
-                  );
-                },
+            const SizedBox(height: 48),
+            const Text(
+              'Aura Mobile Defens',
+              style: TextStyle(
+                color: Color(0xFF00FFFF),
+                fontFamily: 'monospace',
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
               ),
+            ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: _isAuthenticated || _authenticationFailed
+                  ? StreamBuilder<AgentEvent>(
+                      stream: AgentController.instance.events,
+                      builder: (context, snapshot) {
+                        final events = AgentController.instance.history;
+                        _scrollToLatest(events.length);
+                        return ListView.builder(
+                          controller: _scrollController,
+                          padding: const EdgeInsets.fromLTRB(14, 14, 14, 18),
+                          itemCount: events.length,
+                          itemBuilder: (context, index) =>
+                              _SyslogLine(event: events[index]),
+                        );
+                      },
+                    )
+                  : const SizedBox.expand(),
             ),
             _TerminalInput(
               controller: _inputController,
-              cursorAnimation: _cursorBlink,
               isListening: _isListening,
-              isRunning: _isRunning,
+              isRunning: _isRunning || !_isAuthenticated,
               onSubmitted: _dispatch,
               onVoice: _captureVoice,
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _TerminalHeader extends StatelessWidget {
-  const _TerminalHeader({
-    required this.securityLevel,
-  });
-
-  final AuraSecurityLevel securityLevel;
-
-  @override
-  Widget build(BuildContext context) {
-    final (status, color) = switch (securityLevel) {
-      AuraSecurityLevel.safe => ('LOCAL / READY', AuraTokens.success),
-      AuraSecurityLevel.warning => ('LOCAL / REVIEW', AuraTokens.warning),
-      AuraSecurityLevel.critical => ('LOCAL / CRITICAL', AuraTokens.danger),
-    };
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
-      child: Row(
-        children: [
-          const Icon(Icons.terminal, color: AuraTokens.accent, size: 19),
-          const SizedBox(width: 9),
-          const Expanded(
-            child: Text(
-              'AURA // TACTICAL CONSOLE',
-              style: TextStyle(
-                color: AuraTokens.success,
-                fontFamily: 'monospace',
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.5,
-              ),
-            ),
-          ),
-          Text(
-            status,
-            style: TextStyle(
-              color: color,
-              fontFamily: 'monospace',
-              fontSize: 9,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -236,14 +201,17 @@ class _SyslogLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isCommandResponse = event.data?['terminal_response'] == true;
-    final (prefix, color) = switch (event.kind) {
-      AgentEventKind.thought => ('[  INF  ] ', AuraTokens.textMuted),
-      AgentEventKind.action => ('[  NET  ] ', AuraTokens.accent),
-      AgentEventKind.success => ('[  OK   ] ', AuraTokens.success),
-      AgentEventKind.warning => ('[  WARN ] ', AuraTokens.warning),
-      AgentEventKind.error => ('[  CRIT ] ', AuraTokens.danger),
+    final terminalPrefix = event.data?['terminal_prefix'] as String?;
+    final isThinking = event.data?['terminal_thinking'] == true;
+    final defaultPrefix = switch (event.kind) {
+      AgentEventKind.thought => '[  INF  ] ',
+      AgentEventKind.action => '[  NET  ] ',
+      AgentEventKind.success => '[  OK   ] ',
+      AgentEventKind.warning => '[  WARN ] ',
+      AgentEventKind.error => '[  CRIT ] ',
     };
+    final prefix = terminalPrefix ?? defaultPrefix;
+    final color = isThinking ? _terminalYellow : _terminalGreen;
     final timestamp = '${event.ts.hour.toString().padLeft(2, '0')}:'
         '${event.ts.minute.toString().padLeft(2, '0')}:'
         '${event.ts.second.toString().padLeft(2, '0')}';
@@ -255,10 +223,10 @@ class _SyslogLine extends StatelessWidget {
           children: [
             TextSpan(
               text: '$timestamp ',
-              style: const TextStyle(color: AuraTokens.textMuted),
+              style: const TextStyle(color: _terminalGreen),
             ),
             TextSpan(
-              text: isCommandResponse ? '' : prefix,
+              text: prefix,
               style: TextStyle(color: color, fontWeight: FontWeight.w700),
             ),
             TextSpan(
@@ -280,7 +248,6 @@ class _SyslogLine extends StatelessWidget {
 class _TerminalInput extends StatelessWidget {
   const _TerminalInput({
     required this.controller,
-    required this.cursorAnimation,
     required this.isListening,
     required this.isRunning,
     required this.onSubmitted,
@@ -288,7 +255,6 @@ class _TerminalInput extends StatelessWidget {
   });
 
   final TextEditingController controller;
-  final Animation<double> cursorAnimation;
   final bool isListening;
   final bool isRunning;
   final ValueChanged<String> onSubmitted;
@@ -299,21 +265,12 @@ class _TerminalInput extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 9, 10, 8),
       decoration: const BoxDecoration(
-        color: Colors.black,
+        color: const Color(0xFF000000),
         border: Border(top: BorderSide(color: Color(0xFF17352B))),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          const Text(
-            'aura@cyberdefense:~# ',
-            style: TextStyle(
-              color: AuraTokens.accent,
-              fontFamily: 'monospace',
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
           Expanded(
             child: TextField(
               controller: controller,
@@ -321,16 +278,16 @@ class _TerminalInput extends StatelessWidget {
               autofocus: true,
               textInputAction: TextInputAction.send,
               onSubmitted: onSubmitted,
-              cursorColor: AuraTokens.accent,
+              cursorColor: _terminalGreen,
               style: const TextStyle(
-                color: AuraTokens.success,
+                color: _terminalGreen,
                 fontFamily: 'monospace',
                 fontSize: 12,
               ),
               decoration: const InputDecoration(
                 hintText: 'comando o consulta táctica',
                 hintStyle: TextStyle(
-                  color: AuraTokens.textMuted,
+                  color: _terminalGreen,
                   fontFamily: 'monospace',
                 ),
                 border: InputBorder.none,
@@ -339,22 +296,6 @@ class _TerminalInput extends StatelessWidget {
               ),
             ),
           ),
-          AnimatedBuilder(
-            animation: cursorAnimation,
-            builder: (context, child) => Opacity(
-              opacity: cursorAnimation.value,
-              child: child,
-            ),
-            child: const Text(
-              '█',
-              style: TextStyle(
-                color: AuraTokens.accent,
-                fontFamily: 'monospace',
-                fontSize: 13,
-              ),
-            ),
-          ),
-          const SizedBox(width: 3),
           IconButton(
             tooltip: isListening ? 'Escuchando' : 'Dictar consulta',
             onPressed: isRunning || isListening ? null : onVoice,
@@ -362,7 +303,7 @@ class _TerminalInput extends StatelessWidget {
             padding: EdgeInsets.zero,
             icon: Icon(
               isListening ? Icons.hearing : Icons.mic_none,
-              color: isListening ? AuraTokens.warning : AuraTokens.accent,
+              color: _terminalGreen,
               size: 18,
             ),
           ),

@@ -19,7 +19,7 @@ class AuraInferenceResult {
 abstract final class AuraAIInference {
   static const int _expectedTreeCount = 500;
   static const int _maximumTreeDepth = 32;
-  static const RegExp _domainPattern = RegExp(
+  static final RegExp _domainPattern = RegExp(
     r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9-]{1,63})+',
   );
   static const Set<String> _domainFields = <String>{

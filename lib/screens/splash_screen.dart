@@ -79,15 +79,8 @@ class _SplashScreenState extends State<SplashScreen>
         return;
       }
 
-      final authenticated = await _auth.authenticate(
-        localizedReason:
-            'Autentique su identidad para desbloquear Aura Mobile Defens',
-        options: const AuthenticationOptions(
-          stickyAuth: true,
-          biometricOnly: true,
-          useErrorDialogs: true,
-        ),
-      );
+      final authenticated =
+          await AgentController.instance.authenticateBiometricDevice();
       if (!authenticated) {
         _showAuthenticationFailure('ACCESO DENEGADO - NÚCLEO BLOQUEADO.');
         return;
@@ -137,6 +130,12 @@ class _SplashScreenState extends State<SplashScreen>
       _isAuthFailed = true;
       _bootStatusText = message;
     });
+    AgentController.instance.reportCriticalError('PÁNICO CRÍTICO: $message');
+    unawaited(
+      Future<void>.delayed(const Duration(seconds: 2)).then((_) async {
+        if (mounted) await SystemNavigator.pop();
+      }),
+    );
   }
 
   void _navigateToCore() {
@@ -267,8 +266,8 @@ class _SplashScreenState extends State<SplashScreen>
                           Text(
                             _bootStatusText,
                             textAlign: TextAlign.center,
-                            style: const TextStyle(
-                                color: _isAuthFailed
+                            style: TextStyle(
+                              color: _isAuthFailed
                                   ? AuraTokens.danger
                                   : AuraTokens.accent,
                               fontSize: 10,

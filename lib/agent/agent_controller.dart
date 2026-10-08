@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
+
 import '../ai_brain.dart';
 import '../infrastructure/security/aura_dynamic_whitelist.dart';
 import '../providers/aura_state_provider.dart';
@@ -16,6 +18,10 @@ class AgentController {
   static final AgentController instance = AgentController._();
 
   static const int maxHistoryLength = 500;
+  static const MethodChannel _biometricChannel =
+      MethodChannel('com.aura.cyberdefense/biometrics');
+  static const MethodChannel _notificationChannel =
+      MethodChannel('com.aura.cyberdefense/notifications');
   static const String kernelGreeting =
       '[ KERNEL MASTER ACTIVE ] Aura Centinela en línea. Listo para auditar los sockets. Ingrese un comando o consulta táctica.';
   static final AuraVoiceEngine _voiceEngine = AuraVoiceEngine();
@@ -146,6 +152,7 @@ class AgentController {
 
   final List<AgentEvent> history = <AgentEvent>[];
   AuraStateProvider? _securityState;
+  bool _biometricallyAuthenticated = false;
 
   Stream<AgentEvent> get events => _eventController.stream;
   Stream<AgentEvent> get stream => _eventController.stream;
@@ -161,6 +168,48 @@ class AgentController {
       (event) => event.data?['critical_integrity_failure'] == true,
     )) {
       state.setSecurityLevel(AuraSecurityLevel.critical);
+    }
+  }
+
+  Future<bool> authenticateBiometricDevice() async {
+    if (_biometricallyAuthenticated) return true;
+    try {
+      final authenticated = await _biometricChannel.invokeMethod<bool>(
+            'authenticateFingerprint',
+          ) ??
+          false;
+      _biometricallyAuthenticated = authenticated;
+      return authenticated;
+    } on PlatformException catch (error) {
+      reportError(
+        'Fallo biométrico nativo: ${error.message ?? error.code}',
+      );
+      return false;
+    } on MissingPluginException {
+      reportError('El canal biométrico nativo no está disponible.');
+      return false;
+    } on Object catch (error) {
+      reportError('No se pudo completar la autenticación biométrica: $error');
+      return false;
+    }
+  }
+
+  Future<bool> dispatchRealtimeNotification(String title, String body) async {
+    try {
+      return await _notificationChannel.invokeMethod<bool>(
+            'triggerPersistentAlert',
+            <String, String>{'title': title, 'body': body},
+          ) ??
+          false;
+    } on PlatformException catch (error) {
+      reportError(
+        'No se pudo enviar la notificación foreground: '
+        '${error.message ?? error.code}',
+      );
+      return false;
+    } on MissingPluginException {
+      reportError('El canal de notificaciones nativo no está disponible.');
+      return false;
     }
   }
 
@@ -366,6 +415,33 @@ class AgentController {
 
   void reportError(String message) {
     _emit(AgentEvent(kind: AgentEventKind.error, message: message));
+  }
+
+  void reportWarning(String message) {
+    _emit(AgentEvent(kind: AgentEventKind.warning, message: message));
+  }
+
+  void reportTerminalInput(String instruction) {
+    _emit(
+      AgentEvent(
+        kind: AgentEventKind.thought,
+        message: instruction,
+        data: const <String, dynamic>{'terminal_prefix': '[USER]'},
+      ),
+    );
+  }
+
+  void reportTerminalThinking() {
+    _emit(
+      AgentEvent(
+        kind: AgentEventKind.thought,
+        message: 'PENSANDO...',
+        data: const <String, dynamic>{
+          'terminal_prefix': '[AURA]',
+          'terminal_thinking': true,
+        },
+      ),
+    );
   }
 
   void reportCriticalError(String message) {

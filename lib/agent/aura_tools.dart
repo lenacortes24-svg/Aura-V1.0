@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
@@ -44,6 +43,8 @@ abstract class AuraTools {
   static const int _maxModelBytes = 5 * 1024 * 1024;
   static const MethodChannel _engineChannel =
       MethodChannel('com.aura.cyberdefense/engine');
+    static const MethodChannel _panicChannel =
+      MethodChannel('com.aura.cyberdefense/panic');
   static final AuraSecureVault _secureVault = AuraSecureVault();
 
   static Future<ToolResult> execute(
@@ -93,7 +94,7 @@ abstract class AuraTools {
             data: Map<String, dynamic>.from(nativeResult),
           );
         case 'panic_isolation':
-          final isolated = await _engineChannel.invokeMethod<bool>(
+          final isolated = await _panicChannel.invokeMethod<bool>(
                 'panicIsolation',
               ) ??
               false;
@@ -109,7 +110,7 @@ abstract class AuraTools {
             },
           );
         case 'resume_network':
-          final resumed = await _engineChannel.invokeMethod<bool>(
+          final resumed = await _panicChannel.invokeMethod<bool>(
                 'resumeTunnel',
               ) ??
               false;

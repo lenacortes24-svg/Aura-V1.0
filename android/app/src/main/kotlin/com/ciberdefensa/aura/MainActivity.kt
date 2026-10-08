@@ -12,6 +12,9 @@ import android.provider.Settings
 import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
 import android.content.pm.ApplicationInfo
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
 import java.io.File
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -159,11 +162,16 @@ class MainActivity: FlutterFragmentActivity() {
     private val ANTI_TAMPERING_CHANNEL = "com.ciberdefensa.aura/anti_tampering"
     private val SECURITY_CHANNEL = "com.ciberdefensa.aura/security"
     private val ENGINE_CHANNEL = "com.aura.cyberdefense/engine"
+    private val PANIC_CHANNEL = "com.aura.cyberdefense/panic"
+    private val BIOMETRICS_CHANNEL = "com.aura.cyberdefense/biometrics"
+    private val NOTIFICATIONS_CHANNEL = "com.aura.cyberdefense/notifications"
     private val VOICE_CHANNEL = "com.ciberdefensa.aura/voice"
     private val NETWORK_STREAM_CHANNEL = "com.aura.cyberdefense/network_stream"
     private val genomeScannerExecutor = Executors.newSingleThreadExecutor()
     private var pendingShieldResult: MethodChannel.Result? = null
         private var pendingVoiceResult: MethodChannel.Result? = null
+    private var pendingNotificationResult: MethodChannel.Result? = null
+    private var pendingNotificationPayload: Pair<String, String>? = null
     private var vpnReceiverRegistered = false
     private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -179,6 +187,57 @@ class MainActivity: FlutterFragmentActivity() {
         super.configureFlutterEngine(flutterEngine)
         registerVpnReceiver()
         AuraNetworkStream.setApplicationContext(applicationContext)
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            BIOMETRICS_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "authenticateFingerprint" -> authenticateFingerprint(result)
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            NOTIFICATIONS_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "triggerPersistentAlert" -> {
+                    val arguments = call.arguments as? Map<*, *>
+                    val title = arguments?.get("title") as? String
+                    val body = arguments?.get("body") as? String
+                    if (title.isNullOrBlank() || body.isNullOrBlank()) {
+                        result.success(false)
+                    } else if (Build.VERSION.SDK_INT >= 33 &&
+                        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                        PackageManager.PERMISSION_GRANTED
+                    ) {
+                        if (pendingNotificationResult != null) {
+                            result.success(false)
+                        } else {
+                            pendingNotificationResult = result
+                            pendingNotificationPayload = title to body
+                            requestPermissions(
+                                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                                NOTIFICATION_PERMISSION_REQUEST,
+                            )
+                        }
+                    } else {
+                        result.success(
+                            AuraNotificationService.triggerPersistentAlert(
+                                applicationContext,
+                                title,
+                                body,
+                            ),
+                        )
+                    }
+                }
+
+                else -> result.notImplemented()
+            }
+        }
+
         EventChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             NETWORK_STREAM_CHANNEL,
@@ -417,22 +476,31 @@ class MainActivity: FlutterFragmentActivity() {
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
+            PANIC_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "panicIsolation" -> genomeScannerExecutor.execute {
+                    val isolated = AuraVpnService.engagePanicIsolation()
+                    runOnUiThread { result.success(isolated) }
+                }
+
+                "resumeTunnel" -> genomeScannerExecutor.execute {
+                    val resumed = AuraVpnService.resumeTunnel()
+                    runOnUiThread { result.success(resumed) }
+                }
+
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
             VOICE_CHANNEL,
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "startListening" -> startVoiceRecognition(result)
                 else -> result.notImplemented()
             }
-        }
-
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(
-                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                NOTIFICATION_PERMISSION_REQUEST,
-            )
         }
 
         MethodChannel(
@@ -711,6 +779,18 @@ class MainActivity: FlutterFragmentActivity() {
                 )
                 pendingVoiceResult = null
             }
+        } else if (requestCode == NOTIFICATION_PERMISSION_REQUEST) {
+            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            val payload = pendingNotificationPayload
+            val posted = granted && payload != null &&
+                AuraNotificationService.triggerPersistentAlert(
+                    applicationContext,
+                    payload.first,
+                    payload.second,
+                )
+            pendingNotificationResult?.success(posted)
+            pendingNotificationResult = null
+            pendingNotificationPayload = null
         }
     }
 
@@ -793,6 +873,39 @@ class MainActivity: FlutterFragmentActivity() {
         }
     }
 
+    private fun authenticateFingerprint(result: MethodChannel.Result) {
+        val manager = BiometricManager.from(this)
+        if (manager.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) !=
+            BiometricManager.BIOMETRIC_SUCCESS
+        ) {
+            result.success(false)
+            return
+        }
+
+        val prompt = BiometricPrompt(
+            this,
+            ContextCompat.getMainExecutor(this),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(
+                    authenticationResult: BiometricPrompt.AuthenticationResult,
+                ) {
+                    result.success(true)
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    result.success(false)
+                }
+            },
+        )
+        val promptInfo = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Desbloquear Aura Mobile Defens")
+            .setSubtitle("Autentique su huella para abrir la consola")
+            .setNegativeButtonText("Cancelar")
+            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+            .build()
+        prompt.authenticate(promptInfo)
+    }
+
     private fun registerVpnReceiver() {
         if (vpnReceiverRegistered) return
         val filter = IntentFilter(AuraVpnService.ACTION_STATE)
@@ -815,6 +928,9 @@ class MainActivity: FlutterFragmentActivity() {
         pendingShieldResult = null
         pendingVoiceResult?.error("ACTIVITY_DESTROYED", "Activity cerrada.", null)
         pendingVoiceResult = null
+        pendingNotificationResult?.success(false)
+        pendingNotificationResult = null
+        pendingNotificationPayload = null
         super.onDestroy()
     }
 

@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import java.util.concurrent.atomic.AtomicInteger
 
 class AuraNotificationService : Service() {
@@ -22,6 +23,13 @@ class AuraNotificationService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createNotificationChannels(this)
         startForeground(FOREGROUND_NOTIFICATION_ID, createOngoingNotification(this))
+        if (intent?.action == ACTION_ALERT) {
+            postOperatorAlert(
+                this,
+                intent.getStringExtra(EXTRA_TITLE).orEmpty(),
+                intent.getStringExtra(EXTRA_BODY).orEmpty(),
+            )
+        }
         return START_STICKY
     }
 
@@ -29,8 +37,8 @@ class AuraNotificationService : Service() {
 
     private fun createOngoingNotification(context: Context): Notification =
         NotificationCompat.Builder(context, STATUS_CHANNEL_ID)
-            .setContentTitle("Aura Mobile Defens activo")
-            .setContentText("El túnel VPN y el cortafuegos están protegiendo el tráfico.")
+            .setContentTitle("Aura Mobile Defens")
+            .setContentText("Servicio de alertas foreground activo.")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -41,6 +49,9 @@ class AuraNotificationService : Service() {
     companion object {
         private const val STATUS_CHANNEL_ID = "aura_protection_status"
         private const val ALERT_CHANNEL_ID = "aura_firewall_alerts"
+        private const val ACTION_ALERT = "com.aura.cyberdefense.NOTIFY_OPERATOR"
+        private const val EXTRA_TITLE = "title"
+        private const val EXTRA_BODY = "body"
         private const val FOREGROUND_NOTIFICATION_ID = 1019
         private const val FIRST_ALERT_NOTIFICATION_ID = 1020
         private val nextAlertNotificationId = AtomicInteger(FIRST_ALERT_NOTIFICATION_ID)
@@ -48,6 +59,52 @@ class AuraNotificationService : Service() {
             "(?i)^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" +
                 "(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$",
         )
+
+        @JvmStatic
+        fun triggerPersistentAlert(context: Context, title: String, body: String): Boolean {
+            if (title.isBlank() || body.isBlank() || title.length > 120 || body.length > 2000) {
+                return false
+            }
+            val appContext = context.applicationContext
+            if (!NotificationManagerCompat.from(appContext).areNotificationsEnabled()) {
+                Log.w("AuraFirewall", "Operator alert not posted: notifications are disabled.")
+                return false
+            }
+            return try {
+                val intent = Intent(appContext, AuraNotificationService::class.java)
+                    .setAction(ACTION_ALERT)
+                    .putExtra(EXTRA_TITLE, title)
+                    .putExtra(EXTRA_BODY, body)
+                ContextCompat.startForegroundService(appContext, intent)
+                true
+            } catch (exception: Exception) {
+                Log.e("AuraFirewall", "Could not start the alert foreground service.", exception)
+                false
+            }
+        }
+
+        private fun postOperatorAlert(context: Context, title: String, body: String) {
+            if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
+            try {
+                val notification = NotificationCompat.Builder(context, ALERT_CHANNEL_ID)
+                    .setContentTitle(title)
+                    .setContentText(body)
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                    .setSmallIcon(android.R.drawable.ic_lock_lock)
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setCategory(NotificationCompat.CATEGORY_STATUS)
+                    .setAutoCancel(true)
+                    .build()
+                NotificationManagerCompat.from(context).notify(
+                    nextAlertNotificationId.getAndUpdate { current ->
+                        if (current >= Int.MAX_VALUE) FIRST_ALERT_NOTIFICATION_ID else current + 1
+                    },
+                    notification,
+                )
+            } catch (exception: SecurityException) {
+                Log.e("AuraFirewall", "Could not post operator alert.", exception)
+            }
+        }
 
         @JvmStatic
         fun triggerDgaAlert(context: Context, domain: String) {
